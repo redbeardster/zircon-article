@@ -1,0 +1,256 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{isabelle,isabellesym}
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\usepackage{amssymb}
+\usepackage{amsmath}
+
+\setdefaultlanguage{russian}
+\setotherlanguage{english}
+
+% Нарратив (root + isamarkuptext): Charis SIL.
+% Леммы / определения Isabelle (\isabellestyle{it}): Minion Pro.
+% Mono: DejaVu --- символы и код.
+\setmainfont{Charis SIL}[Ligatures=TeX]
+\setsansfont{DejaVu Sans}[Ligatures=TeX]
+\setmonofont{DejaVu Sans Mono}[Scale=0.92]
+\newfontfamily\cyrillicfont{Charis SIL}[Ligatures=TeX]
+\newfontfamily\cyrillicfontsf{DejaVu Sans}[Ligatures=TeX]
+\newfontfamily\cyrillicfonttt{DejaVu Sans Mono}[Scale=0.92]
+\newfontfamily\isabellefont{Minion Pro}[Ligatures=TeX]
+
+% this should be the last package used
+\usepackage{pdfsetup}
+
+\urlstyle{rm}
+\isabellestyle{it}
+% Переопределяем стили Isabelle на Minion Pro (нарратив остаётся Charis/\rmfamily).
+\def\isastyle{\small\isabellefont\itshape}
+\def\isastyleminor{\isabellefont\itshape}
+\def\isastylescript{\footnotesize\isabellefont\itshape}
+
+\begin{document}
+
+\title{Учебная модель передачи capability в стиле Zircon\\
+в Isabelle/HOL}
+\author{redbeardster@gmail.com}
+\maketitle
+
+\begin{abstract}
+В работе представлена \emph{учебная} формальная модель передачи прав
+доступа (capability) в духе микроядра Zircon (основа Fuchsia OS) на языке
+Isabelle/HOL. Мы описываем процессы с таблицами дескрипторов (handles),
+каналы с очередями capabilities, сокращение прав при
+\texttt{zx\_channel\_write} и проверку права записи при \texttt{vmo\_write}.
+Доказаны: невозможность эскалации прав при передаче, сохранение ссылки на
+объект, необходимость \texttt{ZX\_RIGHT\_TRANSFER}, а также целостность
+данных VMO (запись только при наличии \texttt{ZX\_RIGHT\_WRITE}).
+
+Модель намеренно упрощена и \emph{не} является верификацией реального ядра
+Zircon и \emph{не} даёт оснований утверждать корректность TCB Fuchsia.
+\end{abstract}
+
+\section{Введение}
+
+Zircon использует capability-модель: пользовательское пространство обращается
+к объектам ядра через \emph{handles}~--- локальные идентификаторы, к каждому
+из которых привязана маска прав. Handles передаются между процессами через
+каналы; при передаче права могут только уменьшаться.
+
+Цель этой работы~--- зафиксировать небольшой фрагмент этой идеи в Isabelle/HOL
+так, чтобы заявленные свойства \emph{реально следовали} из определений и
+проверялись машиной. Мы явно отделяем:
+\begin{itemize}
+  \item \textbf{постулаты модели}~--- определения и упрощения, которые мы
+        принимаем как аксиоматику учебной системы;
+  \item \textbf{доказанные утверждения}~--- леммы и теоремы, автоматически
+        проверенные Isabelle.
+\end{itemize}
+
+\section{Что мы постулируем}
+
+Ниже перечислены решения модели, которые \emph{не доказываются}, а задаются
+определениями. От них зависят все дальнейшие теоремы.
+
+\subsection{Онтология}
+
+\begin{enumerate}
+  \item Идентификаторы (\texttt{handle\_id}, \texttt{obj\_id},
+        \texttt{process\_id})~--- натуральные числа, а не
+        32-битные слова Zircon.
+  \item Объект ядра~--- пара $\langle\texttt{тип}, \texttt{id}\rangle$; глубокая
+        семантика объектов (кроме абстрактного содержимого VMO) не моделируется.
+  \item Handle~--- ссылка на объект плюс множество прав.
+  \item Глобальное состояние~--- таблицы handles процессов, счётчики id,
+        очереди каналов (ключ~--- \texttt{obj\_id} объекта
+        \texttt{Channel}) и склад содержимого VMO.
+  \item Канал~--- kernel object: доступ к очереди только через handle на
+        endpoint с \texttt{WRITE}/\texttt{READ}.
+\end{enumerate}
+
+\subsection{Правила операций}
+
+\begin{enumerate}
+  \item Сокращение прав~--- пересечение множеств:
+        $R_{\mathrm{actual}} = R_{\mathrm{req}} \cap R_{\mathrm{src}}$.
+  \item \texttt{zx\_channel\_write} требует handle на канал с
+        \texttt{ZX\_RIGHT\_WRITE} и payload с \texttt{ZX\_RIGHT\_TRANSFER};
+        кладёт capability в очередь и \emph{удаляет} payload-handle
+        отправителя (move).
+  \item \texttt{transfer\_via\_channel} работает только на \emph{пустом}
+        канале, чтобы получатель взял именно только что записанную capability.
+  \item \texttt{vmo\_write} проверяет маску при каждом вызове: без
+        \texttt{WRITE} возвращается \texttt{None}, состояние не меняется.
+  \item При \texttt{create\_vmo} можно указать любые начальные права
+        (политика minting вне scope).
+\end{enumerate}
+
+\subsection{Чего мы сознательно не моделируем}
+
+Параллелизм, полный syscall API, refinement к C++, полный набор rights
+Zircon, политика minting при создании объектов.
+
+\section{Операции модели (кратко)}
+
+\begin{center}
+\begin{tabular}{ll}
+\texttt{create\_channel\_pair} & создать Channel и handles двум процессам \\
+\texttt{create\_vmo} & создать VMO и handle в таблице процесса \\
+\texttt{zx\_channel\_write} & move capability в канал через endpoint-handle \\
+\texttt{zx\_channel\_read} & забрать capability в таблицу получателя \\
+\texttt{transfer\_via\_channel} & write+read на пустом канале \\
+\texttt{vmo\_write} & изменить содержимое VMO при наличии WRITE
+\end{tabular}
+\end{center}
+
+Проверка прав происходит и при передаче (пересечение + TRANSFER), и при
+мутирующем syscall (\texttt{vmo\_write}).
+
+\section{Доказанные свойства: путеводитель по леммам}
+
+\subsection{Алгебра прав}
+
+\begin{description}
+  \item[\texttt{reduce\_rights\_subset}]
+        $R_{\mathrm{new}} \cap R_{\mathrm{old}} \subseteq R_{\mathrm{old}}$.
+        Базовый факт: пересечение не добавляет прав.
+  \item[\texttt{reduce\_rights\_idempotent}]
+        Два сокращения подряд = одно с пересечением запросов.
+\end{description}
+
+\subsection{Характеризация write/read}
+
+\begin{description}
+  \item[\texttt{zx\_channel\_write\_success}]
+        Успешный write $\Rightarrow$ были WRITE на канал и TRANSFER на
+        payload; в очередь добавлена capability (в т.\,ч.\ с пустой маской);
+        payload-handle отправителя удалён (move).
+  \item[\texttt{zx\_channel\_read\_success}]
+        Успешный read $\Rightarrow$ capability с головы очереди установлена
+        под свежим handle id у получателя.
+  \item[\texttt{lookup\_after\_set\_table} / \texttt{lookup\_after\_alloc\_hid}]
+        Технические факты о корректности lookup после обновлений.
+\end{description}
+
+\subsection{Шлюз TRANSFER}
+
+\begin{description}
+  \item[\texttt{channel\_write\_requires\_transfer}]
+        Успех write $\Rightarrow$ у источника есть TRANSFER.
+  \item[\texttt{channel\_write\_fails\_without\_transfer}]
+        Нет TRANSFER $\Rightarrow$ write = \texttt{None}.
+\end{description}
+
+\subsection{Передача без эскалации}
+
+\begin{description}
+  \item[\texttt{transfer\_via\_channel\_cap}]
+        Ключевая лемма: получатель имеет ровно
+        $\langle\mathrm{obj}_{\mathrm{src}},\;
+        R_{\mathrm{req}}\cap R_{\mathrm{src}}\rangle$.
+  \item[\texttt{transfer\_via\_channel\_no\_escalation}]
+        Права получателя $\subseteq$ права отправителя.
+  \item[\texttt{transfer\_via\_channel\_preserves\_object}]
+        Тот же \texttt{kernel\_obj}.
+  \item[\texttt{channel\_transfer\_no\_escalation}]
+        Теорема: не существует права, появившегося «из ниоткуда» у
+        получателя.
+\end{description}
+
+\subsection{Целостность VMO и общий запрет записи}
+
+\begin{description}
+  \item[\texttt{vmo\_write\_denied\_without\_write\_right}]
+        Специально для VMO: валидный VMO-handle без WRITE $\Rightarrow$
+        запись запрещена. Это узкий инвариант целостности VMO.
+  \item[\texttt{vmo\_write\_denied\_means\_no\_new\_state}]
+        Шире: для \emph{любого} валидного handle без WRITE вызов
+        \texttt{vmo\_write} даёт \texttt{None} --- в том числе если это
+        handle на Process/Thread и т.п., у которого WRITE нет в маске
+        (или объект вовсе не VMO). Не ошибка, а более общий факт о шлюзе
+        WRITE у операции записи.
+  \item[\texttt{vmo\_write\_succeeds\_iff\_write\_right}]
+        Для VMO-handle успех $\Leftrightarrow$ есть WRITE и точечное
+        обновление store.
+  \item[\texttt{vmo\_write\_updates\_only\_with\_write\_right}]
+        Успех $\Rightarrow$ был WRITE и store обновлён ожидаемо.
+\end{description}
+
+\subsection{Прочее}
+
+\begin{description}
+  \item[\texttt{channel\_write\_moves\_sender\_handle}]
+        Write аннулирует payload-handle отправителя (move).
+  \item[\texttt{example\_scenario\_true}]
+        Полный сценарий A$\to$B с READ-only доказуемо истинен: B не может
+        изменить содержимое VMO; у A payload-handle исчез.
+  \item[\texttt{example\_empty\_rights\_ok\_true}]
+        Передача с запросом $\emptyset$ допустима: получатель имеет пустую
+        маску, объект тот же, \texttt{vmo\_write} отказывает.
+\end{description}
+
+\section{Ограничения (ещё раз)}
+
+Модель полезна для обучения capability-системам и Isabelle/HOL. Она
+\emph{не} доказывает безопасность производственного Zircon/Fuchsia. Любые
+формулировки в духе «complete verification of the TCB» были бы неверны.
+
+\clearpage
+
+\tableofcontents
+
+\clearpage
+
+\parindent 0pt\parskip 0.5ex
+
+% generated text of all theories
+\input{session}
+
+\clearpage
+
+\section{Заключение}
+
+Мы формализовали учебный фрагмент capability-модели:
+\begin{enumerate}
+  \item per-process handles с масками прав;
+  \item передачу через канал с пересечением прав и проверкой TRANSFER;
+  \item проверку WRITE на мутирующем syscall;
+  \item машинно-проверенные доказательства перечисленных свойств.
+\end{enumerate}
+
+Постулаты модели заданы определениями; свойства безопасности выведены из них
+и проверены Isabelle. Это шаг к пониманию capability-инвариантов, но не
+замена верификации реального ядра.
+
+\clearpage
+
+\nocite{*}
+\bibliographystyle{abbrv}
+\bibliography{root}
+
+\end{document}
+
+%%% Local Variables:
+%%% mode: latex
+%%% TeX-master: t
+%%% End:

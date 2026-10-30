@@ -1,0 +1,60 @@
+Микроверификация capability-модели Zircon
+
+Процесс A
+{R, W, T}
+
+Isabelle/HOL
+
+Канал
+∩ прав
+запрошено: {R}
+
+Процесс B
+результат: {R}
+
+Rsrc ∩ Rreq ⇒ отсутствие эскалации
+
+Рис. 2: Схема передачи capability: права получателя равны пересечению запрошенного и
+исходного множеств.
+
+4. Формализация системных операций
+Определения Isabelle/HOL синтаксически близки к языкам вроде Haskell или OCaml.
+Ниже приведена операция помещения capability в очередь канала zx_channel_write.
+definition zx_channel_write ::
+"process_id ⇒ handle_id ⇒ handle_id ⇒ rights ⇒
+system_state ⇒ system_state option" where
+"zx_channel_write pid ch_hid pay_hid req_rights s =
+(case (lookup_handle pid ch_hid s,
+lookup_handle pid pay_hid s, get_table pid s) of
+(Some h_ch, Some h_pay, Some ht) ⇒
+if ch_hid = pay_hid then None
+else if obj_type (h_obj h_ch) ≠ Channel then None
+else if ZX_RIGHT_WRITE ∉ h_rights h_ch then None
+else if ZX_RIGHT_TRANSFER ∉ h_rights h_pay then None
+else if ¬ rights_wf (h_rights h_pay) then None
+else
+(case channels s (obj_id (h_obj h_ch)) of
+None ⇒ None
+| Some q ⇒
+(let actual = reduce_rights_wf req_rights (h_rights h_pay);
+cap = \<lparr>h_obj = h_obj h_pay, h_rights = actual\<rparr
+>;
+ht' = ht(pay_hid := None)
+in Some (... queue update ...))))
+| _ ⇒ None)"
+
+С точки зрения семантики системного вызова существенны следующие черты определения.
+1. Результат имеет тип option: успешное завершение (Some s0 ) либо отказ без изменения
+состояния (None). Тем самым исключается частично обновлённое состояние ядра.
+2. Нужен handle на Channel с ZX_RIGHT_WRITE и payload-handle с ZX_RIGHT_TRANSFER;
+маска payload должна удовлетворять rights_wf.
+3. Права в сообщении — reduce_rights_wf (пересечение с последующим замыканием зависимостей), а не сырое reduce_rights. Результат может быть пустым: тогда передаётся
+capability с маской ∅ (нижняя грань решётки не обрывает write).
+
+4. Исходный payload-handle отправителя удаляется (move). Это фиксируется леммой channel_write_mo
+после успеха lookup_handle pid pay_hid s' = None. Инвариант no-escalation при
+этом сохраняется: получатель всё равно не получает прав сверх исходных и запрошенных.
+
+6
+
+

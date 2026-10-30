@@ -1,0 +1,17 @@
+# Isabelle build artefacts
+output/
+*.thy~
+
+# Editor / OS junk
+*~
+.*.swp
+.DS_Store
+
+# Local LaTeX aux (article rebuild)
+blog/*.aux
+blog/*.log
+blog/*.out
+blog/*.toc
+blog/*.fls
+blog/*.fdb_latexmk
+blog/*.synctex.gz
